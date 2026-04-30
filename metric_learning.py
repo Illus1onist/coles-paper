@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import random
@@ -65,6 +66,72 @@ def shuffle_client_list_reproducible(conf, data):
     return data
 
 
+def _seq_len_stats(data):
+    lengths = [len(rec['event_time']) for rec in data]
+    lengths = np.array(lengths)
+    return {
+        'n': int(len(lengths)),
+        'min': int(lengths.min()),
+        'max': int(lengths.max()),
+        'mean': float(lengths.mean()),
+        'median': float(np.median(lengths)),
+        'p25': float(np.percentile(lengths, 25)),
+        'p75': float(np.percentile(lengths, 75)),
+        'p95': float(np.percentile(lengths, 95)),
+    }
+
+
+def _feature_stats(data, feature_keys):
+    stats = {}
+    for key in feature_keys:
+        values = np.concatenate([rec['feature_arrays'][key] for rec in data if key in rec.get('feature_arrays', {})])
+        stats[key] = {
+            'min': float(values.min()),
+            'max': float(values.max()),
+            'mean': float(values.mean()),
+            'std': float(values.std()),
+        }
+    return stats
+
+
+def save_data_snapshot(train_data, valid_data, conf):
+    stats_path = conf['stats.path']
+    snapshot_path = os.path.join(os.path.dirname(stats_path), 'data_snapshot.json')
+    os.makedirs(os.path.dirname(stats_path), exist_ok=True)
+
+    col_id = conf['dataset'].get('col_id', 'client_id')
+    feature_keys = (
+        list(conf['params.trx_encoder.embeddings'].keys())
+        + list(conf['params.trx_encoder.numeric_values'].keys())
+    )
+
+    def get_ids(data):
+        ids = sorted([rec.get(col_id, rec.get('customer_id', rec.get('installation_id'))) for rec in data])
+        return [int(x) if isinstance(x, (np.integer,)) else x for x in ids]
+
+    train_ids = get_ids(train_data)
+    valid_ids = get_ids(valid_data)
+
+    snapshot = {
+        'seed': conf.get('common_seed', 42),
+        'n_train': len(train_data),
+        'n_valid': len(valid_data),
+        'train_ids_first20': train_ids[:20],
+        'valid_ids_first20': valid_ids[:20],
+        'train_ids_sorted_hash': hash(tuple(train_ids)),
+        'valid_ids_sorted_hash': hash(tuple(valid_ids)),
+        'train_seq_len': _seq_len_stats(train_data),
+        'valid_seq_len': _seq_len_stats(valid_data),
+        'train_feature_stats': _feature_stats(train_data, feature_keys),
+        'valid_feature_stats': _feature_stats(valid_data, feature_keys),
+    }
+
+    with open(snapshot_path, 'w') as f:
+        json.dump(snapshot, f, indent=2)
+
+    logger.info(f'Data snapshot saved to "{snapshot_path}"')
+
+
 def prepare_data(conf):
     data = read_data_gen(conf['dataset.train_path'])
     data = tqdm(data)
@@ -76,8 +143,9 @@ def prepare_data(conf):
     if 'client_list_keep_count' in conf['dataset']:
         data = data[:conf['dataset.client_list_keep_count']]
 
-    valid_ix = np.arange(len(data))
-    valid_ix = np.random.choice(valid_ix, size=int(len(data) * conf['dataset.valid_size']), replace=False)
+    seed = conf.get('common_seed', 42)
+    rng = np.random.default_rng(seed)
+    valid_ix = rng.choice(len(data), size=int(len(data) * conf['dataset.valid_size']), replace=False)
     valid_ix = set(valid_ix.tolist())
 
     logger.info(f'Loaded {len(data)} rows. Split in progress...')
@@ -92,6 +160,10 @@ def prepare_data(conf):
 def create_data_loaders(conf):
     train_data, valid_data = prepare_data(conf)
 
+    save_data_snapshot(train_data, valid_data, conf)
+
+    seed = conf.get('common_seed', 42)
+
     train_dataset = SplittingDataset(
         train_data,
         split_strategy.create(**conf['params.train.split_strategy'])
@@ -101,7 +173,7 @@ def create_data_loaders(conf):
     train_dataset = DropoutTrxDataset(train_dataset, trx_dropout=conf['params.train.trx_dropout'],
                                       seq_len=conf['params.train.max_seq_len'])
 
-    if conf['params.train'].get('all_time_shuffle',False):
+    if conf['params.train'].get('all_time_shuffle', False):
         train_dataset = AllTimeShuffleMLDataset(train_dataset)
         logger.info('AllTimeShuffle used')
 
@@ -111,6 +183,7 @@ def create_data_loaders(conf):
         collate_fn=collate_splitted_rows,
         num_workers=conf['params.train'].get('num_workers', 0),
         batch_size=conf['params.train.batch_size'],
+        generator=torch.Generator().manual_seed(seed),
     )
 
     valid_dataset = SplittingDataset(
@@ -181,6 +254,13 @@ def run_experiment(model, conf):
 
 def main(args=None):
     conf = get_conf(args)
+
+    seed = conf.get('common_seed', 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    logger.info(f'Global seed set to {seed}')
 
     model_f = ml_model_by_type(conf['params.model_type'])
     model = model_f(conf['params'])

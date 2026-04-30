@@ -1,4 +1,5 @@
 {
+  "common_seed": 42,
   "params": {
     "experiment": {
       "name": "default"
