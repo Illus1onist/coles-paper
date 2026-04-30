@@ -1,0 +1,20 @@
+lightgbm
+matplotlib
+numpy
+pandas
+pyhocon
+scikit-learn
+scipy
+tqdm
+tensorboard
+xgboost
+pyarrow
+seaborn
+luigi
+pyspark
+
+# pytorch-ignite: pinned to 0.4.x — 0.4.0.post1 requires PyTorch <2.0.
+# Use 0.4.13 which supports PyTorch 2.x with the same 0.4.x API.
+pytorch-ignite==0.4.13
+
+pytorch-lightning
