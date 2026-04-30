@@ -13,3 +13,5 @@ experiments/*/models
 .DS_Store
 lightning_logs
 experiments/*/conf/embeddings_validation*.work
+experiments/*/results/*.log
+experiments/*/results/*.txt
