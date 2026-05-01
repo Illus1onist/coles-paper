@@ -84,7 +84,10 @@ def _seq_len_stats(data):
 def _feature_stats(data, feature_keys):
     stats = {}
     for key in feature_keys:
-        values = np.concatenate([rec['feature_arrays'][key] for rec in data if key in rec.get('feature_arrays', {})])
+        arrays = [rec['feature_arrays'][key] for rec in data if key in rec.get('feature_arrays', {})]
+        if not arrays:
+            continue
+        values = np.concatenate(arrays)
         stats[key] = {
             'min': float(values.min()),
             'max': float(values.max()),
@@ -92,6 +95,22 @@ def _feature_stats(data, feature_keys):
             'std': float(values.std()),
         }
     return stats
+
+
+def _spot_check_sequences(data, col_id, feature_keys, n_clients=3):
+    spot = []
+    for rec in data[:n_clients]:
+        client_id = rec.get(col_id, rec.get('customer_id', rec.get('installation_id')))
+        entry = {
+            'client_id': int(client_id) if isinstance(client_id, np.integer) else client_id,
+            'seq_len': int(len(rec['event_time'])),
+            'event_time': rec['event_time'].tolist(),
+        }
+        for key in feature_keys:
+            if key in rec.get('feature_arrays', {}):
+                entry[key] = rec['feature_arrays'][key].tolist()
+        spot.append(entry)
+    return spot
 
 
 def save_data_snapshot(train_data, valid_data, conf):
@@ -104,6 +123,7 @@ def save_data_snapshot(train_data, valid_data, conf):
         list(conf['params.trx_encoder.embeddings'].keys())
         + list(conf['params.trx_encoder.numeric_values'].keys())
     )
+    all_feature_keys = feature_keys + ['event_time']
 
     def get_ids(data):
         ids = sorted([rec.get(col_id, rec.get('customer_id', rec.get('installation_id'))) for rec in data])
@@ -122,8 +142,10 @@ def save_data_snapshot(train_data, valid_data, conf):
         'valid_ids_sorted_hash': hash(tuple(valid_ids)),
         'train_seq_len': _seq_len_stats(train_data),
         'valid_seq_len': _seq_len_stats(valid_data),
-        'train_feature_stats': _feature_stats(train_data, feature_keys),
-        'valid_feature_stats': _feature_stats(valid_data, feature_keys),
+        'train_feature_stats': _feature_stats(train_data, all_feature_keys),
+        'valid_feature_stats': _feature_stats(valid_data, all_feature_keys),
+        'train_spot_check': _spot_check_sequences(train_data, col_id, feature_keys),
+        'valid_spot_check': _spot_check_sequences(valid_data, col_id, feature_keys),
     }
 
     with open(snapshot_path, 'w') as f:
