@@ -97,12 +97,19 @@ def _feature_stats(data, feature_keys):
     return stats
 
 
+def _to_int_id(x):
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return x
+
+
 def _spot_check_sequences(data, col_id, feature_keys, n_clients=3):
     spot = []
     for rec in data[:n_clients]:
         client_id = rec.get(col_id, rec.get('customer_id', rec.get('installation_id')))
         entry = {
-            'client_id': int(client_id) if isinstance(client_id, np.integer) else client_id,
+            'client_id': _to_int_id(client_id),
             'seq_len': int(len(rec['event_time'])),
             'event_time': rec['event_time'].tolist(),
         }
@@ -126,8 +133,8 @@ def save_data_snapshot(train_data, valid_data, conf):
     all_feature_keys = feature_keys + ['event_time']
 
     def get_ids(data):
-        ids = sorted([rec.get(col_id, rec.get('customer_id', rec.get('installation_id'))) for rec in data])
-        return [int(x) if isinstance(x, (np.integer,)) else x for x in ids]
+        raw = [rec.get(col_id, rec.get('customer_id', rec.get('installation_id'))) for rec in data]
+        return sorted(_to_int_id(x) for x in raw)
 
     train_ids = get_ids(train_data)
     valid_ids = get_ids(valid_data)
