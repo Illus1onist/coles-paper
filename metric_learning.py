@@ -120,6 +120,131 @@ def _spot_check_sequences(data, col_id, feature_keys, n_clients=3):
     return spot
 
 
+def _batch_feature_stats(values_2d, seq_lens):
+    """Per-feature stats over (B, T) tensor: padded (all entries) and valid-only.
+
+    Padding values are 0 (from torch.nn.utils.rnn.pad_sequence). Valid stats
+    iterate explicitly to avoid masking ambiguity when a real value can equal 0.
+    """
+    padded = values_2d.detach().cpu().numpy().astype(float)
+    padded_stats = {
+        'min': float(padded.min()),
+        'max': float(padded.max()),
+        'mean': float(padded.mean()),
+        'std': float(padded.std()),
+    }
+    valid_chunks = []
+    for i, sl in enumerate(seq_lens.tolist()):
+        valid_chunks.append(padded[i, :sl])
+    valid = np.concatenate(valid_chunks) if valid_chunks else padded.reshape(-1)
+    valid_stats = {
+        'min': float(valid.min()),
+        'max': float(valid.max()),
+        'mean': float(valid.mean()),
+        'std': float(valid.std()),
+    }
+    return padded_stats, valid_stats
+
+
+def _batch_spot_check(payload, seq_lens, targets, feature_keys, n=3, head=20):
+    spot = []
+    sl_list = seq_lens.tolist()
+    target_list = targets.tolist() if targets is not None else [None] * len(sl_list)
+    for i in range(min(n, len(sl_list))):
+        sl = int(sl_list[i])
+        entry = {
+            'slice_idx': int(i),
+            'enumerated_target': int(target_list[i]) if target_list[i] is not None else None,
+            'length': sl,
+        }
+        for key in feature_keys:
+            if key not in payload:
+                continue
+            arr = payload[key][i, :sl].detach().cpu().numpy().tolist()
+            entry[key] = arr[:head]
+        spot.append(entry)
+    return spot
+
+
+def save_first_batch_snapshot(train_loader, conf):
+    """Snapshot-2: capture the first batch as it would be seen by training.
+
+    Saves to data_snapshot_batch.json next to the existing data_snapshot.json.
+
+    RNG state is saved before consuming the batch and restored after, so that
+    `fit_model` sees the SAME first batch regardless of whether this snapshot
+    was taken or not. Restored state covers: python `random`, `numpy`, `torch`
+    (CPU + CUDA), and the DataLoader's `torch.Generator`.
+    """
+    import torch as _torch  # local alias to avoid shadowing the module-level import
+
+    stats_path = conf['stats.path']
+    snapshot_path = os.path.join(os.path.dirname(stats_path), 'data_snapshot_batch.json')
+    os.makedirs(os.path.dirname(stats_path), exist_ok=True)
+
+    embeddings = list(conf['params.trx_encoder.embeddings'].keys())
+    numerics = list(conf['params.trx_encoder.numeric_values'].keys())
+    feature_keys = embeddings + numerics + ['event_time']
+
+    # --- save RNG state ---
+    py_state = random.getstate()
+    np_state = np.random.get_state()
+    torch_state = _torch.get_rng_state()
+    cuda_states = _torch.cuda.get_rng_state_all() if _torch.cuda.is_available() else None
+    loader_gen_state = (
+        train_loader.generator.get_state() if train_loader.generator is not None else None
+    )
+
+    # --- consume first batch ---
+    padded_batch, target = next(iter(train_loader))
+    payload = padded_batch.payload  # dict[name -> Tensor (B, T)]
+    seq_lens = padded_batch.seq_lens  # IntTensor (B,)
+    bs = int(seq_lens.shape[0])
+
+    snapshot = {
+        'seed': conf.get('common_seed', 42),
+        'stage': 'first_batch',
+        'batch_size': bs,
+        'max_seq_len': int(max(payload[next(iter(payload))].shape[1], 0)) if payload else 0,
+        'n_unique_targets': int(len(set(target.tolist()))),
+        'slice_lengths_first20': [int(x) for x in seq_lens.tolist()[:20]],
+        'slice_lengths_hash': hash(tuple(int(x) for x in seq_lens.tolist())),
+        'slice_lengths_stats': {
+            'min': int(seq_lens.min().item()),
+            'max': int(seq_lens.max().item()),
+            'mean': float(seq_lens.float().mean().item()),
+            'median': float(np.median(seq_lens.numpy())),
+            'p25': float(np.percentile(seq_lens.numpy(), 25)),
+            'p75': float(np.percentile(seq_lens.numpy(), 75)),
+            'p95': float(np.percentile(seq_lens.numpy(), 95)),
+        },
+        'enumerated_targets_first20': [int(x) for x in target.tolist()[:20]],
+        'feature_stats_padded': {},
+        'feature_stats_valid': {},
+        'spot_check': _batch_spot_check(payload, seq_lens, target, feature_keys),
+    }
+    for key in feature_keys:
+        if key not in payload:
+            continue
+        padded_stats, valid_stats = _batch_feature_stats(payload[key], seq_lens)
+        snapshot['feature_stats_padded'][key] = padded_stats
+        snapshot['feature_stats_valid'][key] = valid_stats
+
+    with open(snapshot_path, 'w') as f:
+        json.dump(snapshot, f, indent=2)
+
+    logger.info(f'First-batch snapshot saved to "{snapshot_path}"')
+
+    # --- restore RNG state so fit_model sees the SAME first batch as captured ---
+    random.setstate(py_state)
+    np.random.set_state(np_state)
+    _torch.set_rng_state(torch_state)
+    if cuda_states is not None:
+        _torch.cuda.set_rng_state_all(cuda_states)
+    if loader_gen_state is not None:
+        train_loader.generator.set_state(loader_gen_state)
+
+
 def save_data_snapshot(train_data, valid_data, conf):
     stats_path = conf['stats.path']
     snapshot_path = os.path.join(os.path.dirname(stats_path), 'data_snapshot.json')
@@ -242,6 +367,11 @@ def run_experiment(model, conf):
     params = conf['params']
 
     train_loader, valid_loader = create_data_loaders(conf)
+
+    # Snapshot-2: capture first training batch (after slicing/dropout/shuffle).
+    # RNG state is saved/restored inside, so fit_model below sees the same
+    # first batch we captured.
+    save_first_batch_snapshot(train_loader, conf)
 
     sampling_strategy = get_sampling_strategy(params)
     loss = get_loss(params, sampling_strategy)
