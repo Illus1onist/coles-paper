@@ -314,11 +314,16 @@ def save_data_snapshot(train_data, valid_data, conf):
 
     train_order_ids = [_to_int_id(rec.get(col_id, rec.get('customer_id', rec.get('installation_id')))) for rec in train_data]
 
+    _probe = 31992
+    _window = train_order_ids[max(0, _probe - 2): _probe + 3]
+
     snapshot = {
         'seed': conf.get('common_seed', 42),
         'n_train': len(train_data),
         'n_valid': len(valid_data),
         'train_order_first10': train_order_ids[:10],
+        'train_order_at_31992': train_order_ids[_probe] if len(train_order_ids) > _probe else None,
+        'train_order_around_31992': _window,
         'train_ids_first20': train_ids[:20],
         'valid_ids_first20': valid_ids[:20],
         'train_ids_sorted_hash': hash(tuple(train_ids)),
