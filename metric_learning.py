@@ -195,6 +195,8 @@ def save_first_batch_snapshot(train_loader, conf):
         train_loader.generator.get_state() if train_loader.generator is not None else None
     )
 
+    seed = conf.get('common_seed', 42)
+
     # Size of the DataLoader's dataset after prepare_embeddings filtering (min_seq_len).
     # Differs from n_train in snapshot-1 if some clients are filtered out before the split.
     try:
