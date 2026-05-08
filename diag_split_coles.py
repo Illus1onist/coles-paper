@@ -83,19 +83,19 @@ def main(path: str = PARQUET_PATH):
     id_sample = get_client_id(records[0])
     print(f"ID type    : {type(id_sample).__name__}  (example: {_to_int(id_sample)})")
 
-    # Sorted order (before shuffle) — same as EBES native-dtype argsort
+    # Sorted order (before shuffle) — lex sort (client_ids are str in coles-paper parquet)
     sorted_records = sorted(records, key=lambda x: get_client_id(x))
-    sorted_ids = [_to_int(get_client_id(r)) for r in sorted_records]
-    print(f"Sorted IDs (first 10): {sorted_ids[:10]}")
-    print(f"Sorted IDs hash      : {stable_hash(sorted_ids)}")
+    sorted_ids = [str(get_client_id(r)) for r in sorted_records]
+    print(f"Sorted IDs (first 10, lex): {[_to_int(x) for x in sorted_ids[:10]]}")
+    print(f"Sorted IDs hash           : {stable_hash(sorted_ids)}")
     print()
 
     shuffled, train_data = paper_split(records, SEED, VAL_SIZE)
-    train_ids = [_to_int(get_client_id(r)) for r in train_data]
+    train_ids_str = [str(get_client_id(r)) for r in train_data]
     print(f"N_train    : {len(train_data)}")
-    print(f"Train IDs (first 10 in train-list order): {train_ids[:10]}")
-    print(f"Train IDs (sorted, first 10)            : {sorted(train_ids)[:10]}")
-    print(f"Train sorted IDs hash : {stable_hash(sorted(train_ids))}")
+    print(f"Train IDs (first 10 in train-list order): {[_to_int(x) for x in train_ids_str[:10]]}")
+    print(f"Train IDs (sorted lex, first 10)        : {[_to_int(x) for x in sorted(train_ids_str)[:10]]}")
+    print(f"Train sorted IDs hash : {stable_hash(sorted(train_ids_str))}")
 
 
 if __name__ == "__main__":
