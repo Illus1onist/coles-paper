@@ -98,6 +98,40 @@ def main(path: str = PARQUET_PATH):
     print(f"Train IDs (sorted int, first 10)        : {train_ids_int[:10]}")
     print(f"Train sorted IDs hash : {stable_hash(train_ids_int)}")
 
+    # Position 31992 — that's torch.randperm(N, seed=42)[0] for N=44650.
+    # If this differs from EBES, the split orderings diverge.
+    probe = 31992
+    if len(train_ids_str) > probe:
+        print()
+        print(f"Train ID at position {probe}        : {_to_int(train_ids_str[probe])}")
+        print(f"Train IDs around position {probe}    : {[_to_int(x) for x in train_ids_str[probe-2:probe+3]]}")
+
+    # Also show first 5 val choice indices and first 5 shuffled positions for comparison
+    n = len(records)
+    rng_v = np.random.default_rng(SEED)
+    val_pos = rng_v.choice(n, size=int(n * VAL_SIZE), replace=False)
+    print()
+    print(f"rng.choice first 5    : {val_pos[:5].tolist()}")
+
+    # Shuffle a list of positions to compare with EBES side
+    shuffled_positions = list(range(n))
+    py_random.Random(SEED).shuffle(shuffled_positions)
+    print(f"shuffled_positions[:10]: {shuffled_positions[:10]}")
+
+    # Also show what record sits at shuffled_positions[31992] in sorted_records
+    # (this is what EBES iloc-indexes via sorted_df.iloc[shuffled_positions[i]] for the train set)
+    sorted_records_local = sorted(records, key=lambda x: get_client_id(x))
+    shuf2 = list(range(n))
+    py_random.Random(SEED).shuffle(shuf2)
+    val_set = set(val_pos.tolist())
+    train_shuffled_idx = [i for i in range(n) if i not in val_set]
+    print(f"train_shuffled_idx[31992] (i.e. shuffled-array position picked for train slot 31992): "
+          f"{train_shuffled_idx[probe] if len(train_shuffled_idx) > probe else 'OOB'}")
+    if len(train_shuffled_idx) > probe:
+        sp = shuf2[train_shuffled_idx[probe]]
+        print(f"sorted_records[shuffled_positions[that idx]] client_id: "
+              f"{_to_int(get_client_id(sorted_records_local[sp]))}")
+
 
 if __name__ == "__main__":
     main(sys.argv[1] if len(sys.argv) > 1 else PARQUET_PATH)
