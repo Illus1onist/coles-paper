@@ -201,6 +201,31 @@ def save_first_batch_snapshot(train_loader, conf):
     seq_lens = padded_batch.seq_lens  # IntTensor (B,)
     bs = int(seq_lens.shape[0])
 
+    # --- look up raw client_ids from the underlying train_data list ---
+    # `target` carries dataset positions (TargetEnumeratorDataset returns (x, idx)),
+    # which are positions in SplittingDataset.base_dataset == train_data list.
+    col_id = conf['dataset'].get('col_id', 'client_id')
+    ds = train_loader.dataset
+    while hasattr(ds, 'core_dataset'):
+        ds = ds.core_dataset
+    while hasattr(ds, 'delegate'):
+        ds = ds.delegate
+    while hasattr(ds, 'base_dataset'):
+        ds = ds.base_dataset
+    raw_client_ids = []
+    raw_client_ids_ok = True
+    try:
+        for t in target.tolist():
+            rec = ds[int(t)]
+            cid = rec.get(col_id, int(t)) if isinstance(rec, dict) else int(t)
+            try:
+                raw_client_ids.append(int(cid))
+            except (TypeError, ValueError):
+                raw_client_ids.append(str(cid))
+    except (TypeError, KeyError, IndexError, AttributeError):
+        raw_client_ids_ok = False
+        raw_client_ids = None
+
     snapshot = {
         'seed': conf.get('common_seed', 42),
         'stage': 'first_batch',
@@ -209,6 +234,10 @@ def save_first_batch_snapshot(train_loader, conf):
         'n_unique_targets': int(len(set(target.tolist()))),
         'slice_lengths_first20': [int(x) for x in seq_lens.tolist()[:20]],
         'slice_lengths_hash': hash(tuple(int(x) for x in seq_lens.tolist())),
+        'raw_client_ids_first20': raw_client_ids[:20] if raw_client_ids_ok else None,
+        'raw_client_ids_unique_sorted_first20': (
+            sorted(set(raw_client_ids))[:20] if raw_client_ids_ok and raw_client_ids else None
+        ),
         'slice_lengths_stats': {
             'min': int(seq_lens.min().item()),
             'max': int(seq_lens.max().item()),
