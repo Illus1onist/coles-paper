@@ -94,8 +94,9 @@ def main(path: str = PARQUET_PATH):
     train_ids_str = [str(get_client_id(r)) for r in train_data]
     print(f"N_train    : {len(train_data)}")
     print(f"Train IDs (first 10 in train-list order): {[_to_int(x) for x in train_ids_str[:10]]}")
-    print(f"Train IDs (sorted lex, first 10)        : {[_to_int(x) for x in sorted(train_ids_str)[:10]]}")
-    print(f"Train sorted IDs hash : {stable_hash(sorted(train_ids_str))}")
+    train_ids_int = sorted(_to_int(x) for x in train_ids_str)
+    print(f"Train IDs (sorted int, first 10)        : {train_ids_int[:10]}")
+    print(f"Train sorted IDs hash : {stable_hash(train_ids_int)}")
 
 
 if __name__ == "__main__":
