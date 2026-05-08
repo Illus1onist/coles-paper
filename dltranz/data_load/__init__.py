@@ -139,12 +139,15 @@ def read_data_gen(path):
 
 
 class DropoutTrxDataset(Dataset):
-    def __init__(self, dataset: Dataset, trx_dropout, seq_len, with_target=True):
+    def __init__(self, dataset: Dataset, trx_dropout, seq_len, with_target=True,
+                 seed=None, col_id='client_id'):
         self.core_dataset = dataset
         self.trx_dropout = trx_dropout
         self.max_seq_len = seq_len
         self.style = dataset.style
         self.with_target = with_target
+        self.seed = seed
+        self.col_id = col_id
 
     def __len__(self):
         return len(self.core_dataset)
@@ -156,11 +159,33 @@ class DropoutTrxDataset(Dataset):
     def __getitem__(self, idx):
         item = self.core_dataset[idx]
         if type(item) is list:
-            return [self._one_item(t) for t in item]
+            # item is a list of (slice_dict, target) from TargetEnumeratorDataset.
+            # target == original positional idx; we retrieve client_id via the
+            # underlying SplittingDataset → base_dataset chain.
+            client_id = self._get_client_id(idx)
+            return [self._one_item(t, client_id=client_id, local_slice_idx=j)
+                    for j, t in enumerate(item)]
         else:
             return self._one_item(item)
 
-    def _one_item(self, item):
+    def _get_client_id(self, idx):
+        """Walk the delegate chain to reach SplittingDataset and extract client_id."""
+        if self.seed is None:
+            return None
+        ds = self.core_dataset
+        # Traverse ConvertingTrxDataset / TargetEnumeratorDataset wrappers.
+        while hasattr(ds, 'delegate'):
+            ds = ds.delegate
+        while hasattr(ds, 'base_dataset'):
+            ds = ds.base_dataset
+            # ds is now the raw list (train_data) or another dataset.
+            if isinstance(ds, list):
+                rec = ds[idx]
+                return rec.get(self.col_id,
+                               rec.get('customer_id', rec.get('installation_id', idx)))
+        return idx
+
+    def _one_item(self, item, client_id=None, local_slice_idx=0):
         if self.with_target:
             x, y = item
         else:
@@ -169,8 +194,15 @@ class DropoutTrxDataset(Dataset):
         seq_len = len(next(iter(x.values())))
 
         if self.trx_dropout > 0 and seq_len > 0:
-            idx = np.random.choice(seq_len, size=int(seq_len * (1 - self.trx_dropout)+1), replace=False)
-            idx = np.sort(idx)
+            if client_id is not None and self.seed is not None:
+                # Per-client-slice deterministic RNG: matches EBES TrxDropout.
+                rng = np.random.default_rng([int(self.seed), int(client_id), local_slice_idx])
+                n_keep = min(int(seq_len * (1 - self.trx_dropout) + 1), seq_len)
+                idx = np.sort(rng.choice(seq_len, size=n_keep, replace=False))
+            else:
+                idx = np.random.choice(seq_len, size=int(seq_len * (1 - self.trx_dropout) + 1),
+                                       replace=False)
+                idx = np.sort(idx)
         else:
             idx = np.arange(seq_len)
 

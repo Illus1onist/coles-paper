@@ -318,14 +318,18 @@ def create_data_loaders(conf):
 
     seed = conf.get('common_seed', 42)
 
+    col_id = conf['dataset'].get('col_id', 'client_id')
     train_dataset = SplittingDataset(
         train_data,
-        split_strategy.create(**conf['params.train.split_strategy'])
+        split_strategy.create(**conf['params.train.split_strategy']),
+        seed=seed,
+        col_id=col_id,
     )
     train_dataset = TargetEnumeratorDataset(train_dataset)
     train_dataset = ConvertingTrxDataset(train_dataset)
     train_dataset = DropoutTrxDataset(train_dataset, trx_dropout=conf['params.train.trx_dropout'],
-                                      seq_len=conf['params.train.max_seq_len'])
+                                      seq_len=conf['params.train.max_seq_len'],
+                                      seed=seed, col_id=col_id)
 
     if conf['params.train'].get('all_time_shuffle', False):
         train_dataset = AllTimeShuffleMLDataset(train_dataset)
