@@ -195,6 +195,21 @@ def save_first_batch_snapshot(train_loader, conf):
         train_loader.generator.get_state() if train_loader.generator is not None else None
     )
 
+    # Size of the DataLoader's dataset after prepare_embeddings filtering (min_seq_len).
+    # Differs from n_train in snapshot-1 if some clients are filtered out before the split.
+    try:
+        train_dataset_size = len(train_loader.dataset)
+    except Exception:
+        train_dataset_size = None
+
+    # What randperm(train_dataset_size, seed) produces — to verify shuffle alignment.
+    if train_dataset_size is not None:
+        _g = _torch.Generator()
+        _g.manual_seed(seed)
+        _perm_first5 = _torch.randperm(train_dataset_size, generator=_g)[:5].tolist()
+    else:
+        _perm_first5 = None
+
     # --- consume first batch ---
     padded_batch, target = next(iter(train_loader))
     payload = padded_batch.payload  # dict[name -> Tensor (B, T)]
@@ -230,6 +245,8 @@ def save_first_batch_snapshot(train_loader, conf):
         'seed': conf.get('common_seed', 42),
         'stage': 'first_batch',
         'batch_size': bs,
+        'train_dataset_size': train_dataset_size,
+        'expected_randperm_first5': _perm_first5,
         'max_seq_len': int(max(payload[next(iter(payload))].shape[1], 0)) if payload else 0,
         'n_unique_targets': int(len(set(target.tolist()))),
         'slice_lengths_first20': [int(x) for x in seq_lens.tolist()[:20]],
@@ -293,10 +310,13 @@ def save_data_snapshot(train_data, valid_data, conf):
     train_ids = get_ids(train_data)
     valid_ids = get_ids(valid_data)
 
+    train_order_ids = [_to_int_id(rec.get(col_id, rec.get('customer_id', rec.get('installation_id')))) for rec in train_data]
+
     snapshot = {
         'seed': conf.get('common_seed', 42),
         'n_train': len(train_data),
         'n_valid': len(valid_data),
+        'train_order_first10': train_order_ids[:10],
         'train_ids_first20': train_ids[:20],
         'valid_ids_first20': valid_ids[:20],
         'train_ids_sorted_hash': hash(tuple(train_ids)),
