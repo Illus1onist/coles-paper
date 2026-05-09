@@ -223,12 +223,35 @@ def save_first_batch_snapshot(train_loader, conf):
     # which are positions in SplittingDataset.base_dataset == train_data list.
     col_id = conf['dataset'].get('col_id', 'client_id')
     ds = train_loader.dataset
+    chain_types = [type(ds).__name__]
     while hasattr(ds, 'core_dataset'):
         ds = ds.core_dataset
+        chain_types.append(type(ds).__name__)
     while hasattr(ds, 'delegate'):
         ds = ds.delegate
+        chain_types.append(type(ds).__name__)
     while hasattr(ds, 'base_dataset'):
         ds = ds.base_dataset
+        chain_types.append(type(ds).__name__)
+
+    logger.info(f'COLES_PROBE [save_first_batch_snapshot] target.dtype={target.dtype} '
+                f'target[:5]={[int(x) for x in target.tolist()[:5]]} '
+                f'len(target)={len(target)} bs={bs}')
+    logger.info(f'COLES_PROBE [save_first_batch_snapshot] expected_randperm={_perm_first5} '
+                f'len(train_loader.dataset)={train_dataset_size}')
+    logger.info(f'COLES_PROBE [save_first_batch_snapshot] unwrap_chain={chain_types} '
+                f'final_type={type(ds).__name__} '
+                f'final_id={id(ds)} '
+                f'is_list={isinstance(ds, list)} len={len(ds) if hasattr(ds, "__len__") else "?"}')
+    if isinstance(ds, list) and len(ds) > 31992:
+        logger.info(f'COLES_PROBE [save_first_batch_snapshot] '
+                    f'ds[31992][{col_id}]={ds[31992].get(col_id)!r} '
+                    f'ds[31992][event_time][:3]={list(ds[31992].get("event_time", []))[:3]}')
+    if len(target) > 0:
+        first_t = int(target.tolist()[0])
+        logger.info(f'COLES_PROBE [save_first_batch_snapshot] target[0]={first_t} '
+                    f'ds[target[0]][{col_id}]='
+                    f'{ds[first_t].get(col_id) if isinstance(ds, list) and 0 <= first_t < len(ds) else "OOB"!r}')
     raw_client_ids = []
     raw_client_ids_ok = True
     try:
@@ -364,17 +387,32 @@ def prepare_data(conf):
 
     logger.info(f'Train data len: {len(train_data)}, Valid data len: {len(valid_data)}')
 
+    col_id = conf['dataset'].get('col_id', 'client_id')
+    if len(train_data) > 31992:
+        rec = train_data[31992]
+        logger.info(f'COLES_PROBE [end of prepare_data] train_data id(list)={id(train_data)} '
+                    f'train_data[31992][{col_id}]={rec.get(col_id)!r} '
+                    f'event_time_len={len(rec.get("event_time", []))}')
+
     return train_data, valid_data
 
 
 def create_data_loaders(conf):
     train_data, valid_data = prepare_data(conf)
 
+    col_id = conf['dataset'].get('col_id', 'client_id')
+    if len(train_data) > 31992:
+        logger.info(f'COLES_PROBE [before save_data_snapshot] id(train_data)={id(train_data)} '
+                    f'train_data[31992][{col_id}]={train_data[31992].get(col_id)!r}')
+
     save_data_snapshot(train_data, valid_data, conf)
+
+    if len(train_data) > 31992:
+        logger.info(f'COLES_PROBE [after  save_data_snapshot] id(train_data)={id(train_data)} '
+                    f'train_data[31992][{col_id}]={train_data[31992].get(col_id)!r}')
 
     seed = conf.get('common_seed', 42)
 
-    col_id = conf['dataset'].get('col_id', 'client_id')
     train_dataset = SplittingDataset(
         train_data,
         split_strategy.create(**conf['params.train.split_strategy']),
@@ -399,6 +437,26 @@ def create_data_loaders(conf):
         batch_size=conf['params.train.batch_size'],
         generator=torch.Generator().manual_seed(seed),
     )
+
+    if len(train_data) > 31992:
+        # Walk the chain like save_first_batch_snapshot does and verify it lands on train_data
+        ds_probe = train_loader.dataset
+        chain = [type(ds_probe).__name__]
+        while hasattr(ds_probe, 'core_dataset'):
+            ds_probe = ds_probe.core_dataset
+            chain.append(type(ds_probe).__name__)
+        while hasattr(ds_probe, 'delegate'):
+            ds_probe = ds_probe.delegate
+            chain.append(type(ds_probe).__name__)
+        while hasattr(ds_probe, 'base_dataset'):
+            ds_probe = ds_probe.base_dataset
+            chain.append(type(ds_probe).__name__)
+        is_same = ds_probe is train_data
+        logger.info(f'COLES_PROBE [after  DataLoader build] chain={chain} '
+                    f'unwrapped is train_data?={is_same} '
+                    f'unwrapped[31992][{col_id}]='
+                    f'{ds_probe[31992].get(col_id) if isinstance(ds_probe, list) and len(ds_probe) > 31992 else "N/A"!r} '
+                    f'train_data[31992][{col_id}]={train_data[31992].get(col_id)!r}')
 
     valid_dataset = SplittingDataset(
         valid_data,
