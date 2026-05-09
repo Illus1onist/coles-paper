@@ -204,10 +204,14 @@ def save_first_batch_snapshot(train_loader, conf):
     except Exception:
         train_dataset_size = None
 
-    # What randperm(train_dataset_size, seed) produces — to verify shuffle alignment.
+    # What the DataLoader's first iter actually picks: PyTorch's _BaseDataLoaderIter
+    # advances the generator by ONE random int (`_base_seed`) before RandomSampler
+    # calls randperm. Without this matching advance, expected_randperm_first5 would
+    # differ from target.tolist()[0] even though both use seed 42.
     if train_dataset_size is not None:
         _g = _torch.Generator()
         _g.manual_seed(seed)
+        _torch.empty((), dtype=_torch.int64).random_(generator=_g)
         _perm_first5 = _torch.randperm(train_dataset_size, generator=_g)[:5].tolist()
     else:
         _perm_first5 = None
