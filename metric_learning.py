@@ -369,6 +369,200 @@ def save_data_snapshot(train_data, valid_data, conf):
     logger.info(f'Data snapshot saved to "{snapshot_path}"')
 
 
+def _flatten_seq(module):
+    """Recursively flatten an nn.Sequential to a list of leaf modules."""
+    out = []
+    if isinstance(module, torch.nn.Sequential):
+        for child in module.children():
+            out.extend(_flatten_seq(child))
+    else:
+        out.append(module)
+    return out
+
+
+def _layer_output_stats_coles(x):
+    """Stats for either a coles PaddedBatch (payload: tensor (B,T,D)) or Tensor (B,H).
+
+    Mirrors EBES `_layer_output_stats` so JSONs can be diffed key-by-key. Note
+    that EBES uses (T,B,D) layout while coles uses (B,T,D); we report shape as
+    [T, B, D] in both for consistency.
+    """
+    if hasattr(x, 'payload') and not isinstance(x.payload, dict):
+        payload = x.payload.detach().float().cpu().numpy()
+        seq_lens_t = x.seq_lens
+        seq_lens = (
+            seq_lens_t.detach().cpu().numpy()
+            if hasattr(seq_lens_t, 'detach')
+            else np.asarray(seq_lens_t)
+        )
+        B, T, D = payload.shape
+        padded = {
+            "shape": [T, B, D],
+            "min": float(payload.min()),
+            "max": float(payload.max()),
+            "mean": float(payload.mean()),
+            "std": float(payload.std()),
+        }
+        valid_chunks = []
+        for b in range(B):
+            sl = int(seq_lens[b])
+            if sl > 0:
+                valid_chunks.append(payload[b, :sl, :])
+        if valid_chunks:
+            valid = np.concatenate(valid_chunks, axis=0)
+            valid_stats = {
+                "min": float(valid.min()),
+                "max": float(valid.max()),
+                "mean": float(valid.mean()),
+                "std": float(valid.std()),
+            }
+        else:
+            valid_stats = padded
+        d_show = min(8, D)
+        sl0 = int(seq_lens[0]) if B > 0 else 0
+        spot = {
+            "slice0_t0_first8": (
+                [float(v) for v in payload[0, 0, :d_show].tolist()] if B > 0 else []
+            ),
+            "slice0_tlast_first8": (
+                [float(v) for v in payload[0, max(0, sl0 - 1), :d_show].tolist()]
+                if B > 0 else []
+            ),
+        }
+        return {"kind": "Seq", "padded": padded, "valid": valid_stats, "spot": spot}
+
+    arr = x.detach().float().cpu().numpy()
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    B, H = arr.shape
+    d_show = min(8, H)
+    out = {
+        "kind": "Tensor",
+        "shape": [B, H],
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+        "mean": float(arr.mean()),
+        "std": float(arr.std()),
+        "spot": {
+            "slice0_first8": (
+                [float(v) for v in arr[0, :d_show].tolist()] if B > 0 else []
+            ),
+            "slice4_first8": (
+                [float(v) for v in arr[min(4, B - 1), :d_show].tolist()] if B > 4 else []
+            ),
+        },
+    }
+    row_norms = np.linalg.norm(arr, axis=1)
+    out["row_norms_first5"] = [float(v) for v in row_norms[:5].tolist()]
+    out["row_norms_stats"] = {
+        "min": float(row_norms.min()),
+        "max": float(row_norms.max()),
+        "mean": float(row_norms.mean()),
+    }
+    return out
+
+
+def save_forward_snapshot(model, train_loader, conf):
+    """Snapshot-3: param init stats + forward output stats per layer on first batch.
+
+    Mirrors EBES `save_forward_snapshot` so the resulting JSONs are directly
+    comparable. Captures (in `data_snapshot_forward.json`):
+      - per-parameter init stats (mean/std/min/max/norm/shape/dtype/numel) so we
+        can verify EBES and coles initialise to the same weights at iter 0.
+      - forward output of each leaf layer of the (possibly nested) Sequential
+        on the FIRST training batch. For an `rnn_model` the leaves are
+        TrxEncoder -> RnnEncoder -> LastStepEncoder -> L2Normalization, which
+        line up 1:1 with EBES's Batch2Seq -> GRU -> TakeLastHidden -> L2Normalization.
+
+    Wraps everything in `model.eval()` + `torch.no_grad()` so global RNG is not
+    consumed. The DataLoader iter consumes loader-side state, so we save and
+    restore Python/numpy/torch/CUDA/loader.generator RNG states (same pattern
+    as save_first_batch_snapshot) to keep fit_model reproducible.
+    """
+    import torch as _torch
+
+    stats_path = conf['stats.path']
+    snapshot_path = os.path.join(os.path.dirname(stats_path), 'data_snapshot_forward.json')
+    os.makedirs(os.path.dirname(stats_path), exist_ok=True)
+
+    py_state = random.getstate()
+    np_state = np.random.get_state()
+    torch_state = _torch.get_rng_state()
+    cuda_states = _torch.cuda.get_rng_state_all() if _torch.cuda.is_available() else None
+    loader_gen_state = (
+        train_loader.generator.get_state() if train_loader.generator is not None else None
+    )
+
+    seed = conf.get('common_seed', 42)
+
+    snapshot = {"seed": seed, "stage": "first_forward"}
+
+    param_stats = {}
+    param_names = []
+    for name, p in model.named_parameters():
+        param_names.append(name)
+        pf = p.detach().float()
+        param_stats[name] = {
+            "shape": list(p.shape),
+            "numel": int(p.numel()),
+            "mean": float(pf.mean().item()),
+            "std": float(pf.std().item()) if p.numel() > 1 else 0.0,
+            "min": float(pf.min().item()),
+            "max": float(pf.max().item()),
+            "norm": float(pf.norm().item()),
+            "dtype": str(p.dtype),
+        }
+    snapshot["param_names"] = param_names
+    snapshot["param_names_hash"] = hash(tuple(param_names))
+    snapshot["n_total_params"] = int(sum(p.numel() for p in model.parameters()))
+    snapshot["param_stats"] = param_stats
+
+    padded_batch, target = next(iter(train_loader))
+
+    device = next(model.parameters()).device
+    if hasattr(padded_batch, 'to'):
+        padded_batch = padded_batch.to(device)
+
+    was_training = model.training
+    model.eval()
+    intermediates = []
+    with _torch.no_grad():
+        x = padded_batch
+        for layer in _flatten_seq(model):
+            x = layer(x)
+            intermediates.append((type(layer).__name__, x))
+    if was_training:
+        model.train()
+
+    seq_lens = padded_batch.seq_lens
+    if hasattr(seq_lens, 'detach'):
+        seq_lens_np = seq_lens.detach().cpu().numpy()
+    else:
+        seq_lens_np = np.asarray(seq_lens)
+    snapshot["batch_meta"] = {
+        "B": int(seq_lens_np.shape[0]),
+        "lengths_first5": [int(v) for v in seq_lens_np[:5].tolist()],
+        "device": str(device),
+    }
+
+    forward = {}
+    for i, (lname, out) in enumerate(intermediates):
+        forward[f"layer_{i}_{lname}"] = _layer_output_stats_coles(out)
+    snapshot["forward"] = forward
+
+    with open(snapshot_path, 'w') as f:
+        json.dump(snapshot, f, indent=2)
+    logger.info(f'Forward snapshot saved to "{snapshot_path}"')
+
+    random.setstate(py_state)
+    np.random.set_state(np_state)
+    _torch.set_rng_state(torch_state)
+    if cuda_states is not None:
+        _torch.cuda.set_rng_state_all(cuda_states)
+    if loader_gen_state is not None:
+        train_loader.generator.set_state(loader_gen_state)
+
+
 def prepare_data(conf):
     data = read_data_gen(conf['dataset.train_path'])
     data = tqdm(data)
@@ -494,6 +688,11 @@ def run_experiment(model, conf):
     # RNG state is saved/restored inside, so fit_model below sees the same
     # first batch we captured.
     save_first_batch_snapshot(train_loader, conf)
+
+    # Snapshot-3: model param init stats + per-layer forward output on first
+    # batch. Same save/restore-RNG pattern as snapshot-2 so fit_model is not
+    # disturbed.
+    save_forward_snapshot(model, train_loader, conf)
 
     sampling_strategy = get_sampling_strategy(params)
     loss = get_loss(params, sampling_strategy)
