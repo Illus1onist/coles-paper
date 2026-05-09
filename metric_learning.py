@@ -419,16 +419,17 @@ def _layer_output_stats_coles(x):
         else:
             valid_stats = padded
         d_show = min(8, D)
-        sl0 = int(seq_lens[0]) if B > 0 else 0
-        spot = {
-            "slice0_t0_first8": (
-                [float(v) for v in payload[0, 0, :d_show].tolist()] if B > 0 else []
-            ),
-            "slice0_tlast_first8": (
-                [float(v) for v in payload[0, max(0, sl0 - 1), :d_show].tolist()]
-                if B > 0 else []
-            ),
-        }
+        # payload is B-first [B, T, D]; EBES is T-first [T, B, D].
+        # slice{si}_t0 = payload[si, 0, :] = EBES tokens[0, si, :]  (same data point)
+        spot = {}
+        for si in range(min(3, B)):
+            sl = int(seq_lens[si])
+            spot[f"slice{si}_t0_first8"] = [float(v) for v in payload[si, 0, :d_show].tolist()]
+            spot[f"slice{si}_tlast_first8"] = [
+                float(v) for v in payload[si, max(0, sl - 1), :d_show].tolist()
+            ]
+        if B > 0:
+            spot["slice0_t0_full"] = [float(v) for v in payload[0, 0, :].tolist()]
         return {"kind": "Seq", "padded": padded, "valid": valid_stats, "spot": spot}
 
     arr = x.detach().float().cpu().numpy()
@@ -436,6 +437,10 @@ def _layer_output_stats_coles(x):
         arr = arr.reshape(-1, 1)
     B, H = arr.shape
     d_show = min(8, H)
+    spot_tensor = {}
+    for si in [0, 1, 2, 4]:
+        if B > si:
+            spot_tensor[f"slice{si}_first8"] = [float(v) for v in arr[si, :d_show].tolist()]
     out = {
         "kind": "Tensor",
         "shape": [B, H],
@@ -443,14 +448,7 @@ def _layer_output_stats_coles(x):
         "max": float(arr.max()),
         "mean": float(arr.mean()),
         "std": float(arr.std()),
-        "spot": {
-            "slice0_first8": (
-                [float(v) for v in arr[0, :d_show].tolist()] if B > 0 else []
-            ),
-            "slice4_first8": (
-                [float(v) for v in arr[min(4, B - 1), :d_show].tolist()] if B > 4 else []
-            ),
-        },
+        "spot": spot_tensor,
     }
     row_norms = np.linalg.norm(arr, axis=1)
     out["row_norms_first5"] = [float(v) for v in row_norms[:5].tolist()]
@@ -523,16 +521,42 @@ def save_forward_snapshot(model, train_loader, conf):
     if hasattr(padded_batch, 'to'):
         padded_batch = padded_batch.to(device)
 
+    # Raw batch values — payload is B-first [B, T] per feature
+    batch_raw = {}
+    if hasattr(padded_batch, 'payload') and isinstance(padded_batch.payload, dict):
+        pl = padded_batch.payload
+        B_raw = next(iter(pl.values())).shape[0]
+        for feat_name, feat_tensor in pl.items():
+            # feat_tensor: [B, T]; dump first 5 timesteps for first 3 users
+            for si in range(min(3, B_raw)):
+                batch_raw[f"{feat_name}_slice{si}_first5"] = feat_tensor[si, :5].cpu().tolist()
+
+    # Hooks on TrxEncoder sub-modules (embeddings + scalers)
+    sub_hooks = {}
+    hook_handles = []
+    # Find TrxEncoder — first child of first child in the nested Sequential
+    flat_layers = _flatten_seq(model)
+    trx_enc = flat_layers[0] if flat_layers else None
+    if trx_enc is not None and hasattr(trx_enc, 'embeddings'):
+        for emb_name, emb_mod in trx_enc.embeddings.items():
+            def _h_emb(m, inp, out, name=emb_name, _d=sub_hooks):
+                # out: [B, T, dim] (coles is B-first)
+                _d[f"emb_{name}_slice0_t0_full"] = [float(v) for v in out[0, 0, :].cpu().tolist()]
+                _d[f"emb_{name}_slice1_t0_full"] = [float(v) for v in out[1, 0, :].cpu().tolist()] if out.shape[0] > 1 else []
+            hook_handles.append(emb_mod.register_forward_hook(_h_emb))
+
     was_training = model.training
     model.eval()
     intermediates = []
     with _torch.no_grad():
         x = padded_batch
-        for layer in _flatten_seq(model):
+        for layer in flat_layers:
             x = layer(x)
             intermediates.append((type(layer).__name__, x))
     if was_training:
         model.train()
+    for h in hook_handles:
+        h.remove()
 
     seq_lens = padded_batch.seq_lens
     if hasattr(seq_lens, 'detach'):
@@ -544,6 +568,8 @@ def save_forward_snapshot(model, train_loader, conf):
         "lengths_first5": [int(v) for v in seq_lens_np[:5].tolist()],
         "device": str(device),
     }
+    snapshot["batch_raw"] = batch_raw
+    snapshot["batch2seq_sub"] = sub_hooks
 
     forward = {}
     for i, (lname, out) in enumerate(intermediates):
