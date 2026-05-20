@@ -12,6 +12,7 @@ class SplittingDataset(Dataset):
         self.splitter = splitter
         self.seed = seed
         self.col_id = col_id
+        self.epoch = 0  # updated each epoch by PrepareEpoch handler
 
     def __len__(self):
         return len(self.base_dataset)
@@ -26,7 +27,7 @@ class SplittingDataset(Dataset):
         # Falls back to positional idx when col_id is absent.
         client_id = row.get(self.col_id, row.get('customer_id', row.get('installation_id', idx)))
 
-        indexes = self.splitter.split(local_date, client_id=client_id, seed=self.seed)
+        indexes = self.splitter.split(local_date, client_id=client_id, seed=self.seed, epoch=self.epoch)
         data = [{k: v[ix] for k, v in feature_arrays.items()} for ix in indexes]
         return data
 

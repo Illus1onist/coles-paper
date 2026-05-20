@@ -148,6 +148,7 @@ class DropoutTrxDataset(Dataset):
         self.with_target = with_target
         self.seed = seed
         self.col_id = col_id
+        self.epoch = 0  # updated each epoch by PrepareEpoch handler
 
     def __len__(self):
         return len(self.core_dataset)
@@ -195,8 +196,8 @@ class DropoutTrxDataset(Dataset):
 
         if self.trx_dropout > 0 and seq_len > 0:
             if client_id is not None and self.seed is not None:
-                # Per-client-slice deterministic RNG: matches EBES TrxDropout.
-                rng = np.random.default_rng([int(self.seed), int(client_id), local_slice_idx])
+                # Per-client-per-epoch-slice deterministic RNG: matches EBES TrxDropout.
+                rng = np.random.default_rng([int(self.seed), int(client_id), self.epoch, local_slice_idx])
                 n_keep = min(int(seq_len * (1 - self.trx_dropout) + 1), seq_len)
                 idx = np.sort(rng.choice(seq_len, size=n_keep, replace=False))
             else:

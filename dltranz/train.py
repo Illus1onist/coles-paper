@@ -231,9 +231,24 @@ class PrepareEpoch:
     def __init__(self, train_loader):
         self.train_loader = train_loader
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, engine):
         if hasattr(self.train_loader, 'prepare_epoch'):
             self.train_loader.prepare_epoch()
+        # Advance epoch counter on augmentation datasets (SplittingDataset,
+        # DropoutTrxDataset) so per-client RNG varies each epoch.
+        # Ignite epochs are 1-indexed; convert to 0-indexed for RNG seed parity
+        # with EBES Trainer._last_epoch (also 0-indexed at epoch start).
+        epoch = engine.state.epoch - 1
+        ds = getattr(self.train_loader, 'dataset', None)
+        while ds is not None and not isinstance(ds, list):
+            if hasattr(ds, 'epoch'):
+                ds.epoch = epoch
+            nxt = None
+            for attr in ('core_dataset', 'delegate', 'base_dataset'):
+                nxt = getattr(ds, attr, None)
+                if nxt is not None:
+                    break
+            ds = nxt
 
 
 def fit_model(model, train_loader, valid_loader, loss, optimizer, scheduler, params, valid_metrics, train_handlers):

@@ -96,7 +96,7 @@ class SampleSlices(AbsSplit):
         self.short_seq_crop_rate = short_seq_crop_rate
         self.is_sorted = is_sorted
 
-    def split(self, dates, client_id=None, seed=None):
+    def split(self, dates, client_id=None, seed=None, epoch=0):
         date_len = dates.shape[0]
         date_range = np.arange(date_len)
 
@@ -111,9 +111,9 @@ class SampleSlices(AbsSplit):
         cnt_max = self.cnt_max if date_len > self.cnt_max else date_len
 
         if client_id is not None and seed is not None:
-            # Per-client deterministic RNG: independent of processing order.
-            # Matches EBES RandomSlices which uses the same seeding formula.
-            rng = np.random.default_rng([int(seed), int(client_id)])
+            # Per-client-per-epoch deterministic RNG: order-independent (matches EBES
+            # RandomSlices) and fresh each epoch (restores contrastive augmentation diversity).
+            rng = np.random.default_rng([int(seed), int(client_id), int(epoch)])
             lengths = rng.integers(cnt_min, cnt_max, self.split_count)
             available_start_pos = (date_len - lengths).clip(0, None)
             start_pos = (rng.uniform(size=self.split_count) * (available_start_pos + 1 - 1e-9)).astype(int)
